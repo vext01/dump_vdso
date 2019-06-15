@@ -1,3 +1,4 @@
+/*
 // Copyright (c) 2018 King's College London
 // created by the Software Development Team <http://soft-dev.org/> and
 // Davin McCall.
@@ -35,34 +36,28 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+*/
 
 /*
  * Small program to dump the VDSO page to file on Linux systems.
- *
- * Assumes x86-64.
  */
-
-#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/auxv.h>
-#include <err.h>
+#include <sys/types.h>
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
 #include <elf.h>
 
-#define ELF_MAGIC 0x464C457F
+/* Prototypes */
+void usage(char *);
+size_t get_vdso_length(char *, int);
 
-// Protos.
-void usage(void);
-long get_vdso_length(unsigned long);
-
-void
-usage(void)
+void usage(char *name)
 {
-    fprintf(stderr, "usage: dump_vdso <output-file>\n");
+    fprintf(stderr, "usage: %s <output-file>\n", name);
     exit(EXIT_FAILURE);
 }
 
@@ -73,103 +68,126 @@ usage(void)
  * ourselves. We do this by taking the maximum end address of the contents of
  * the VDSO.
  */
-long
-get_vdso_length(unsigned long vdso_start) {
-    Elf64_Ehdr *hdr = (Elf64_Ehdr *) vdso_start;
-    long max_offset = 0;
+size_t get_vdso_length(char *vdso_start, int bits)
+{
+    int phdr_tab_max,
+        sec_tab_max,
+        num_phdrs,
+        num_shdrs,
+        phentsize,
+        shentsize,
+        phoff,
+        shoff,
+        i;
+    off_t offset,
+          max_offset = 0;
 
-    // Look at the program headers for the segments.
-    int num_phdrs =  hdr->e_phnum;
-    int phoff = hdr->e_phoff;
-    int phentsize = hdr->e_phentsize;
-    for (int i = 0; i < num_phdrs; i++) {
-        Elf64_Phdr *phdr =
-            (Elf64_Phdr *) (vdso_start + phoff + i * phentsize);
-        long offset = phdr->p_offset + phdr->p_filesz;
-        if (max_offset < offset) {
-            max_offset = offset;
-        }
+#define CODE do {							\
+    /* Look at the program headers for the segments */			\
+    num_phdrs = hdr->e_phnum;						\
+    phoff = hdr->e_phoff;						\
+    phentsize = hdr->e_phentsize;					\
+    for( i = 0; i < num_phdrs; i++ )					\
+    {									\
+        phdr = (void *)((char *)vdso_start + phoff + i * phentsize);	\
+        offset = phdr->p_offset + phdr->p_filesz;			\
+        if(max_offset < offset)						\
+           max_offset = offset;						\
+    }									\
+									\
+    /* Look at the sections */						\
+    num_shdrs = hdr->e_shnum;						\
+    shentsize = hdr->e_shentsize;					\
+    shoff = hdr->e_shoff;						\
+    for( i = 0; i < num_shdrs; i++ )					\
+    {									\
+        shdr = (void *)((char *)vdso_start + shoff + i * shentsize);	\
+        offset = shdr->sh_offset + shdr->sh_size;			\
+        if(max_offset < offset)						\
+           max_offset = offset;						\
+    }									\
+									\
+    /* The section table */						\
+    sec_tab_max = shoff + num_shdrs * shentsize;			\
+    if(max_offset < sec_tab_max)					\
+       max_offset = sec_tab_max;					\
+									\
+    /* Program header table */						\
+    phdr_tab_max = phoff + num_phdrs * phentsize;			\
+    if(max_offset < phdr_tab_max)					\
+       max_offset = phdr_tab_max;					\
+} while(0)
+
+    if(bits == 32)
+    {
+        Elf32_Ehdr *hdr = (void *)vdso_start;
+        Elf32_Phdr *phdr;
+        Elf32_Shdr *shdr;
+        CODE;
     }
-
-    // Look at the sections.
-    int num_shdrs = hdr->e_shnum;
-    int shentsize = hdr->e_shentsize;
-    int shoff = hdr->e_shoff;
-    for (int i = 0; i < num_shdrs; i++) {
-        Elf64_Shdr *shdr =
-            (Elf64_Shdr *) (vdso_start + shoff + i * shentsize);
-        long offset = shdr->sh_offset + shdr->sh_size;
-        if (max_offset < offset) {
-            max_offset = offset;
-        }
+    else if(bits == 64)
+    {
+        Elf64_Ehdr *hdr = (void *)vdso_start;
+        Elf64_Phdr *phdr;
+        Elf64_Shdr *shdr;
+        CODE;
     }
-
-    // The section table.
-    int sec_tab_max = shoff + num_shdrs * shentsize;
-    if (max_offset < sec_tab_max) {
-        max_offset = sec_tab_max;
-    }
-
-    // Program header table.
-    int phdr_tab_max = phoff + num_phdrs * phentsize;
-    if (max_offset < phdr_tab_max) {
-        max_offset = sec_tab_max;
-    }
-
     return max_offset;
 }
 
-#if defined(__linux__) && defined(__x86_64__)
 int main(int argc, char **argv)
 {
-    int ret = EXIT_SUCCESS;
+    Elf32_Ehdr *hdr;
+    void *vdso_start;
+    int bits,
+        ret = EXIT_SUCCESS;
     FILE *fh = NULL;
+    size_t n_wrote,
+           vdso_len;
 
-    if (argc != 2) {
-        usage();
+    if(argc < 2)
+    {
+        usage(argv[0]);
     }
 
-    // Get the start virtual address of the VDSO.
-    unsigned long vdso_start = getauxval(AT_SYSINFO_EHDR);
-    uint32_t *elf_magic = (uint32_t *) vdso_start;
-    if (*elf_magic != 0x464C457F) {
+    /* Get the start virtual address of the VDSO */
+    hdr = vdso_start = (void *)getauxval(AT_SYSINFO_EHDR);
+    if(memcmp(hdr->e_ident, ELFMAG, SELFMAG))
+    {
         fprintf(stderr, "elf magic bad");
         ret = EXIT_FAILURE;
         goto clean;
     }
 
-    long vdso_len = get_vdso_length(vdso_start);
-
-    // Now it's just a matter of putting the VDSO to disk.
-    fh = fopen(argv[1], "wb");
-    if (fh == NULL) {
-        fprintf(stderr, "fopen: %s\n", strerror(errno));
+    if(!(bits = hdr->e_ident[EI_CLASS] * 32))
+    {
         ret = EXIT_FAILURE;
         goto clean;
     }
 
-    int n_wrote = fwrite((void *) vdso_start, 1, vdso_len, fh);
-    if (n_wrote != vdso_len) {
-        fprintf(stderr, "fwrite failed\n");
+    vdso_len = get_vdso_length(vdso_start, bits);
+
+    /* Now it's just a matter of putting the VDSO to disk. */
+    fh = fopen(argv[1], "w");
+    if(!fh)
+    {
+        perror("fopen");
         ret = EXIT_FAILURE;
         goto clean;
+    }
+
+    n_wrote = fwrite(vdso_start, 1, vdso_len, fh);
+    if(n_wrote != vdso_len)
+    {
+        fprintf(stderr, "fwrite failed\n");
+        ret = EXIT_FAILURE;
     }
 
 clean:
-    if (fh) {
+    if(fh)
+    {
         fclose(fh);
     }
 
     return ret;
 }
-#else
-int
-main(int argc, char **argv)
-{
-    (void) argc;
-    (void) argv;
-
-    fprintf(stderr, "This is a Linux/X86_64 utility\n");
-    exit(EXIT_FAILURE);
-}
-#endif
