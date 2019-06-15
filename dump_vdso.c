@@ -146,9 +146,7 @@ int main(int argc, char **argv)
            vdso_len;
 
     if(argc < 2)
-    {
         usage(argv[0]);
-    }
 
     /* Get the start virtual address of the VDSO */
     hdr = vdso_start = (void *)getauxval(AT_SYSINFO_EHDR);
@@ -185,9 +183,7 @@ int main(int argc, char **argv)
 
 clean:
     if(fh)
-    {
         fclose(fh);
-    }
 
     return ret;
 }
